@@ -8,8 +8,10 @@
 #define I2C "I2C"
 #define WIFI "WIFI"
 #define NVS "NVS"
+#define MQTT "MQTT"
 #define WIFI_SSID "hilltop"
 #define WIFI_PASS "YOUR_WIFI_PASSWORD"
 #define MQTT_TOPIC "raspi/sensors/data"
+#define CONFIG_BROKER_URL "mqtt://YOUR_BROKER_IP"
 
 #endif
