@@ -1,4 +1,5 @@
 #include "bmp280.h"
+#include "cJSON.h"
 #include "config.h"
 #include "driver/i2c_master.h"
 #include "esp_event.h"
@@ -8,6 +9,69 @@
 #include "freertos/task.h"
 #include "mqtt_client.h"
 #include "nvs_flash.h"
+
+char *create_bmp280_json(float temperature, float pressure) {
+  const unsigned int pressure_temp_nums[2] = {temperature, pressure};
+
+  char *return_string = NULL;
+  cJSON *name = NULL;
+  cJSON *data = NULL;
+  cJSON *sensor_values = NULL;
+  cJSON *temperature_json = NULL;
+  cJSON *pressure_json = NULL;
+  size_t index = 0;
+
+  cJSON *bmp280_json = cJSON_CreateObject();
+  if (bmp280_json == NULL) {
+    ESP_LOGE(BMP280, "Failed to create BMP280 JSON object");
+    goto end;
+  }
+
+  // name = cJSON_CreateString("bmp280 data");
+  // if (name == NULL) {
+  //   ESP_LOGE(BMP280, "Failed to create BMP280 JSON object");
+  //   goto end;
+  // }
+  // cJSON_AddItemToObject(bmp280_json, "name", name);
+
+  // data = cJSON_CreateArray();
+  // if (data == NULL) {
+  //   ESP_LOGE(BMP280, "Failed to create data JSON array");
+  //   goto end;
+  // }
+
+  // cJSON_AddItemToObject(bmp280_json, "data", data);
+
+  // sensor_values = cJSON_CreateObject();
+  // if (sensor_values == NULL) {
+  //   ESP_LOGE(BMP280, "Failed to create sensor_values JSON object");
+  //   goto end;
+  // }
+  // cJSON_AddItemToArray(data, sensor_values);
+
+  temperature_json = cJSON_CreateNumber(pressure_temp_nums[0]);
+  if (temperature_json == NULL) {
+    ESP_LOGE(BMP280, "Failed to create temperature JSON number");
+    goto end;
+  }
+  cJSON_AddItemToObject(bmp280_json, "temperature", temperature_json);
+
+  pressure_json = cJSON_CreateNumber(pressure_temp_nums[1]);
+  if (pressure_json == NULL) {
+    ESP_LOGE(BMP280, "Failed to create pressure JSON number");
+    goto end;
+  }
+  cJSON_AddItemToObject(bmp280_json, "pressure", pressure_json);
+
+  return_string = cJSON_Print(bmp280_json);
+  if (return_string == NULL) {
+    ESP_LOGE(BMP280, "Failed to print BMP280 JSON object");
+  }
+
+end:
+  cJSON_Delete(bmp280_json);
+  return return_string;
+}
 
 static void log_error_if_nonzero(const char *message, int error_code) {
   if (error_code != 0) {
@@ -25,20 +89,20 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
   switch ((esp_mqtt_event_id_t)event_id) {
   case MQTT_EVENT_CONNECTED:
     ESP_LOGI(MQTT, "MQTT_EVENT_CONNECTED");
-    msg_id = esp_mqtt_client_subscribe(client, MQTT_TOPIC, 0);
-    ESP_LOGI(MQTT, "sent subscribe successful, msg_id=%d", msg_id);
-    msg_id = esp_mqtt_client_subscribe(client, MQTT_TOPIC, 1);
-    ESP_LOGI(MQTT, "sent subscribe successful, msg_id=%d", msg_id);
-    msg_id = esp_mqtt_client_unsubscribe(client, MQTT_TOPIC);
-    ESP_LOGI(MQTT, "sent unsubscribe successful, msg_id=%d", msg_id);
+    // msg_id = esp_mqtt_client_subscribe(client, MQTT_TOPIC, 0);
+    // ESP_LOGI(MQTT, "sent subscribe successful, msg_id=%d", msg_id);
+    // msg_id = esp_mqtt_client_subscribe(client, MQTT_TOPIC, 1);
+    // ESP_LOGI(MQTT, "sent subscribe successful, msg_id=%d", msg_id);
+    // msg_id = esp_mqtt_client_unsubscribe(client, MQTT_TOPIC);
+    // ESP_LOGI(MQTT, "sent unsubscribe successful, msg_id=%d", msg_id);
     break;
   case MQTT_EVENT_DISCONNECTED:
     ESP_LOGI(MQTT, "MQTT_EVENT_DISCONNECTED");
     break;
   case MQTT_EVENT_SUBSCRIBED:
     ESP_LOGI(MQTT, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-    msg_id = esp_mqtt_client_publish(client, MQTT, "data", 0, 0, 0);
-    ESP_LOGI(MQTT, "sent publish successful, msg_id=%d", msg_id);
+    // msg_id = esp_mqtt_client_publish(client, MQTT_TOPIC, "data", 0, 0, 0);
+    // ESP_LOGI(MQTT, "sent publish successful, msg_id=%d", msg_id);
     break;
   case MQTT_EVENT_UNSUBSCRIBED:
     ESP_LOGI(MQTT, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
@@ -70,15 +134,16 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
   }
 }
 
-static void mqtt_app_start(void) {
-  esp_mqtt_client_config_t mqtt_cfg = {
-      .broker.address.uri = CONFIG_BROKER_URL,
-  };
-  esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
-  esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler,
-                                 NULL);
-  esp_mqtt_client_start(client);
-}
+// static void mqtt_app_start(void) {
+//   esp_mqtt_client_config_t mqtt_cfg = {
+//       .broker.address.uri = CONFIG_BROKER_URL,
+//   };
+//   esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+//   esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID,
+//   mqtt_event_handler,
+//                                  NULL);
+//   esp_mqtt_client_start(client);
+// }
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data) {
@@ -221,7 +286,16 @@ static void read_bmp280_task(void *pvParameters) {
     return;
   }
 
+  esp_mqtt_client_config_t mqtt_cfg = {
+      .broker.address.uri = CONFIG_BROKER_URL,
+  };
+  esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+  esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler,
+                                 NULL);
+  esp_mqtt_client_start(client);
+
   while (1) {
+
     vTaskDelay(pdMS_TO_TICKS(2000));
     ESP_LOGI(BMP280, "###### BMP280 - START #######");
     float temperature = 0;
@@ -232,6 +306,15 @@ static void read_bmp280_task(void *pvParameters) {
       ESP_LOGE(BMP280, "BMP280 read failed: %s", esp_err_to_name(result));
     } else {
       pressure /= 100; // Convert Pa to hPa
+
+      // char strBuffer[50];
+      // sprintf(strBuffer, "%.2f\n%.2f", temperature, pressure);
+
+      // data structure for cjson
+      char *strBuffer = create_bmp280_json(temperature, pressure);
+
+      esp_mqtt_client_publish(client, MQTT_TOPIC, strBuffer, 0, 0, 0);
+
       ESP_LOGI(BMP280, "Temperature: %.2f C", temperature);
       ESP_LOGI(BMP280, "Pressure: %.2f hPa", pressure);
     }
@@ -281,7 +364,7 @@ void app_main(void) {
     return;
   }
 
-  mqtt_app_start();
+  // mqtt_app_start();
 
   // start sensor reading task
   xTaskCreate(read_bmp280_task, "bmp280_task", 4096, bmp280_dev_hdl, 5, NULL);
