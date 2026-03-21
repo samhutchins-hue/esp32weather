@@ -1,3 +1,4 @@
 .pio
 include/config.h
 compile_commands.json
+pi/.env

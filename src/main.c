@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <time.h>
 #include "bmp280.h"
 #include "cJSON.h"
 #include "config.h"
@@ -9,16 +10,35 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "esp_sntp.h"
 #include "mqtt_client.h"
 #include "nvs_flash.h"
 
-// EventGroup instead of task notifications
+// eventgroup instead of task notifications, allows conditioning data reading on
+// a consistent 32 bit address, rather than consuming a single notification with
+// task notifications, (wifi + sntp init before reading data and mqtt setup)
 static EventGroupHandle_t wifi_event_group;
 
-char *create_bmp280_json(float temperature, float pressure) {
+// log and set sntp bit in wifi eventgroup after async time sync request
+static void sntp_sync_callback(struct timeval *tv) {
+  ESP_LOGI(WIFI, "SNTP time synchronized");
+  xEventGroupSetBits(wifi_event_group, TIME_SYNCED_BIT);
+}
+
+// setup os time check to polling mode and request time from default pool
+static void init_sntp(void) {
+  esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+  esp_sntp_setservername(0, "pool.ntp.org");
+  sntp_set_time_sync_notification_cb(sntp_sync_callback);
+  esp_sntp_init();
+  ESP_LOGI(WIFI, "SNTP initialized");
+}
+
+char *create_bmp280_json(float temperature, float pressure, time_t timestamp) {
   char *return_string = NULL;
   cJSON *temperature_json = NULL;
   cJSON *pressure_json = NULL;
+  cJSON *timestamp_json = NULL;
 
   cJSON *bmp280_json = cJSON_CreateObject();
   if (bmp280_json == NULL) {
@@ -40,6 +60,13 @@ char *create_bmp280_json(float temperature, float pressure) {
   }
   cJSON_AddItemToObject(bmp280_json, "pressure", pressure_json);
 
+  timestamp_json = cJSON_CreateNumber((double)timestamp);
+  if (timestamp_json == NULL) {
+    ESP_LOGE(BMP280, "Failed to create timestamp JSON number");
+    goto end;
+  }
+  cJSON_AddItemToObject(bmp280_json, "timestamp", timestamp_json);
+
   return_string = cJSON_Print(bmp280_json);
   if (return_string == NULL) {
     ESP_LOGE(BMP280, "Failed to print BMP280 JSON object");
@@ -60,25 +87,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t event_id, void *event_data) {
   ESP_LOGD(MQTT, "Event dispatched from event loop base=%s, event_id=%" PRIi32, base, event_id);
   esp_mqtt_event_handle_t event = event_data;
-  esp_mqtt_client_handle_t client = event->client;
-  int msg_id;
   switch ((esp_mqtt_event_id_t)event_id) {
   case MQTT_EVENT_CONNECTED:
     ESP_LOGI(MQTT, "MQTT_EVENT_CONNECTED");
-    // msg_id = esp_mqtt_client_subscribe(client, MQTT_TOPIC, 0);
-    // ESP_LOGI(MQTT, "sent subscribe successful, msg_id=%d", msg_id);
-    // msg_id = esp_mqtt_client_subscribe(client, MQTT_TOPIC, 1);
-    // ESP_LOGI(MQTT, "sent subscribe successful, msg_id=%d", msg_id);
-    // msg_id = esp_mqtt_client_unsubscribe(client, MQTT_TOPIC);
-    // ESP_LOGI(MQTT, "sent unsubscribe successful, msg_id=%d", msg_id);
     break;
   case MQTT_EVENT_DISCONNECTED:
     ESP_LOGI(MQTT, "MQTT_EVENT_DISCONNECTED");
     break;
   case MQTT_EVENT_SUBSCRIBED:
     ESP_LOGI(MQTT, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-    // msg_id = esp_mqtt_client_publish(client, MQTT_TOPIC, "data", 0, 0, 0);
-    // ESP_LOGI(MQTT, "sent publish successful, msg_id=%d", msg_id);
     break;
   case MQTT_EVENT_UNSUBSCRIBED:
     ESP_LOGI(MQTT, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
@@ -245,7 +262,7 @@ static esp_err_t init_bmp280(i2c_master_bus_handle_t bus_handle,
 
 static void read_bmp280_task(void *pvParameters) {
   // wait on wifi connection before reading data and publishing to mqtt broker
-  xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+  xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT | TIME_SYNCED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
   bmp280_handle_t bmp280_dev_hdl = (bmp280_handle_t)pvParameters;
   ESP_LOGI(BMP280, "BMP280 task started, handle: %p", bmp280_dev_hdl);
 
@@ -274,10 +291,11 @@ static void read_bmp280_task(void *pvParameters) {
     if (result != ESP_OK) {
       ESP_LOGE(BMP280, "BMP280 read failed: %s", esp_err_to_name(result));
     } else {
-      pressure /= 100; // Convert Pa to hPa
+      // Convert Pa to hPa
+      pressure /= 100;
 
-      // data structure for cjson
-      char *strBuffer = create_bmp280_json(temperature, pressure);
+      time_t now = time(NULL);
+      char *strBuffer = create_bmp280_json(temperature, pressure, now);
 
       esp_mqtt_client_publish(client, MQTT_TOPIC, strBuffer, 0, 0, 0);
       free(strBuffer);
@@ -302,7 +320,7 @@ static void cleanup(i2c_master_bus_handle_t bus_handle,
 }
 
 void app_main(void) {
-  esp_log_level_set("*", ESP_LOG_VERBOSE); // Enable verbose logging
+  esp_log_level_set("*", ESP_LOG_VERBOSE);
 
   wifi_event_group = xEventGroupCreate();
 
@@ -317,6 +335,10 @@ void app_main(void) {
     ESP_LOGE(WIFI, "Stopping application due to WiFi failure");
     return;
   }
+
+  // initialize SNTP 
+  // starts after wifi connects via EventGroup
+  init_sntp();
 
   // initialize I2C bus
   i2c_master_bus_handle_t bus_handle = NULL;
