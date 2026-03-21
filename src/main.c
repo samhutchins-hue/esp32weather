@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include "bmp280.h"
 #include "cJSON.h"
 #include "config.h"
@@ -6,20 +7,18 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "mqtt_client.h"
 #include "nvs_flash.h"
 
-char *create_bmp280_json(float temperature, float pressure) {
-  const unsigned int pressure_temp_nums[2] = {temperature, pressure};
+// EventGroup instead of task notifications
+static EventGroupHandle_t wifi_event_group;
 
+char *create_bmp280_json(float temperature, float pressure) {
   char *return_string = NULL;
-  cJSON *name = NULL;
-  cJSON *data = NULL;
-  cJSON *sensor_values = NULL;
   cJSON *temperature_json = NULL;
   cJSON *pressure_json = NULL;
-  size_t index = 0;
 
   cJSON *bmp280_json = cJSON_CreateObject();
   if (bmp280_json == NULL) {
@@ -27,36 +26,14 @@ char *create_bmp280_json(float temperature, float pressure) {
     goto end;
   }
 
-  // name = cJSON_CreateString("bmp280 data");
-  // if (name == NULL) {
-  //   ESP_LOGE(BMP280, "Failed to create BMP280 JSON object");
-  //   goto end;
-  // }
-  // cJSON_AddItemToObject(bmp280_json, "name", name);
-
-  // data = cJSON_CreateArray();
-  // if (data == NULL) {
-  //   ESP_LOGE(BMP280, "Failed to create data JSON array");
-  //   goto end;
-  // }
-
-  // cJSON_AddItemToObject(bmp280_json, "data", data);
-
-  // sensor_values = cJSON_CreateObject();
-  // if (sensor_values == NULL) {
-  //   ESP_LOGE(BMP280, "Failed to create sensor_values JSON object");
-  //   goto end;
-  // }
-  // cJSON_AddItemToArray(data, sensor_values);
-
-  temperature_json = cJSON_CreateNumber(pressure_temp_nums[0]);
+  temperature_json = cJSON_CreateNumber(temperature);
   if (temperature_json == NULL) {
     ESP_LOGE(BMP280, "Failed to create temperature JSON number");
     goto end;
   }
   cJSON_AddItemToObject(bmp280_json, "temperature", temperature_json);
 
-  pressure_json = cJSON_CreateNumber(pressure_temp_nums[1]);
+  pressure_json = cJSON_CreateNumber(pressure);
   if (pressure_json == NULL) {
     ESP_LOGE(BMP280, "Failed to create pressure JSON number");
     goto end;
@@ -75,14 +52,13 @@ end:
 
 static void log_error_if_nonzero(const char *message, int error_code) {
   if (error_code != 0) {
-    ESP_LOGE(MQTT, "Last error &s: 0x%x", message, error_code);
+    ESP_LOGE(MQTT, "Last error %s: 0x%x", message, error_code);
   }
 }
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t event_id, void *event_data) {
-  ESP_LOGD(MQTT, "Event dispatched from event loop base=%s, event_id=%", PRIi32,
-           "", base, event_id);
+  ESP_LOGD(MQTT, "Event dispatched from event loop base=%s, event_id=%" PRIi32, base, event_id);
   esp_mqtt_event_handle_t event = event_data;
   esp_mqtt_client_handle_t client = event->client;
   int msg_id;
@@ -134,17 +110,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
   }
 }
 
-// static void mqtt_app_start(void) {
-//   esp_mqtt_client_config_t mqtt_cfg = {
-//       .broker.address.uri = CONFIG_BROKER_URL,
-//   };
-//   esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
-//   esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID,
-//   mqtt_event_handler,
-//                                  NULL);
-//   esp_mqtt_client_start(client);
-// }
-
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data) {
   if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
@@ -155,6 +120,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     esp_wifi_connect();
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
     ESP_LOGI(WIFI, "Got IP, connected to WiFi");
+    // flip signal bit of wifi connected EventGroup
+    xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
   }
 }
 
@@ -277,6 +244,8 @@ static esp_err_t init_bmp280(i2c_master_bus_handle_t bus_handle,
 }
 
 static void read_bmp280_task(void *pvParameters) {
+  // wait on wifi connection before reading data and publishing to mqtt broker
+  xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
   bmp280_handle_t bmp280_dev_hdl = (bmp280_handle_t)pvParameters;
   ESP_LOGI(BMP280, "BMP280 task started, handle: %p", bmp280_dev_hdl);
 
@@ -307,13 +276,11 @@ static void read_bmp280_task(void *pvParameters) {
     } else {
       pressure /= 100; // Convert Pa to hPa
 
-      // char strBuffer[50];
-      // sprintf(strBuffer, "%.2f\n%.2f", temperature, pressure);
-
       // data structure for cjson
       char *strBuffer = create_bmp280_json(temperature, pressure);
 
       esp_mqtt_client_publish(client, MQTT_TOPIC, strBuffer, 0, 0, 0);
+      free(strBuffer);
 
       ESP_LOGI(BMP280, "Temperature: %.2f C", temperature);
       ESP_LOGI(BMP280, "Pressure: %.2f hPa", pressure);
@@ -336,6 +303,8 @@ static void cleanup(i2c_master_bus_handle_t bus_handle,
 
 void app_main(void) {
   esp_log_level_set("*", ESP_LOG_VERBOSE); // Enable verbose logging
+
+  wifi_event_group = xEventGroupCreate();
 
   // initialize NVS
   if (init_nvs() != ESP_OK) {
@@ -363,8 +332,6 @@ void app_main(void) {
     cleanup(bus_handle, NULL);
     return;
   }
-
-  // mqtt_app_start();
 
   // start sensor reading task
   xTaskCreate(read_bmp280_task, "bmp280_task", 4096, bmp280_dev_hdl, 5, NULL);
