@@ -14,7 +14,7 @@ load_dotenv()
 MQTT_BROKER = os.getenv("MQTT_BROKER")
 MQTT_TOPIC = os.getenv("MQTT_TOPIC")
 
-INFLUX_BUCKET = os.getenv("MQTT_BUCKET")
+INFLUX_BUCKET = os.getenv("INFLUX_BUCKET")
 INFLUX_ORG = os.getenv("INFLUX_ORG")
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
 INFLUX_URL= os.getenv("INFLUX_URL")
@@ -34,6 +34,7 @@ write_api = client.write_api(write_options=SYNCHRONOUS)
 
 def on_connect(client, userdata, flags, reason_code, properties):
     print(f"Connected with result code {reason_code}")
+    print(f"Subscribing to topic: {MQTT_TOPIC}")
     mqttc.subscribe(MQTT_TOPIC)
 
 def on_message(mqttc, obj, msg):
@@ -49,10 +50,11 @@ def on_message(mqttc, obj, msg):
     pressure = result['pressure']
     timestamp = result['timestamp']
 
-    p = Point("my_measurement").tag("timestamp", timestamp).field("temperature", temperature).field("pressure", pressure)
+    p = Point("bmp280").field("temperature", temperature).field("pressure", pressure).time(timestamp, write_precision="s")
 
     try:
         write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=p)
+        print("Write successful")
     except InfluxDBError as e:
         print(f"InfluxDB error: {e}")
         return
